@@ -25,7 +25,7 @@ contract ERC420 is ERC1155 {
     uint256 public constant WITHDRAWAL_PERCENTAGE = 10;
 
     // constructor(string memory uri) ERC1155(uri) {}
-    constructor(string memory uri) ERC1155("https://example.com/metadata.json") {}
+    constructor(string memory uri) ERC1155("ipfs://bafkreifpc6oda3eqfq6plborptqkn5sfewx7xky44blziiwzy4nubx7vfe") {}
 
 
     /**
