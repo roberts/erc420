@@ -26,6 +26,8 @@ contract ERC420 is ERC1155, Ownable, ReentrancyGuard {
     uint256 public maxMintSupply = 1000;
     uint256 public currentMintSupply;
 
+    bool public sharedURI;
+
     mapping(uint256 => mintToken_data) public mintTokens;
     mapping(uint256 => mapping(address => uint256)) public mintTokenBalance;
     mapping(uint256 => mapping(address => uint256)) public mintTokenVestDate;
@@ -73,6 +75,13 @@ contract ERC420 is ERC1155, Ownable, ReentrancyGuard {
         emit adminAction("setMintActive", msg.sender, mintActive_ ? 0 : 1 );
     }
 
+    // Enable or disable unique URI JSON
+    function setSharedURI(bool sharedURI_) external onlyOwner {
+        sharedURI = sharedURI_;
+
+        emit adminAction("setSharedURI", msg.sender, sharedURI_ ? 0 : 1 );
+    }
+
     // Deposit tokens to a specific mint
     // TOKEN APPROVAL MUST HAPPEN EXTERNALLY FIRST
     function depositTokens(uint256 mintID_, address tokenAddress_, uint256 tokenAmount_) external onlyOwner {
@@ -99,12 +108,16 @@ contract ERC420 is ERC1155, Ownable, ReentrancyGuard {
     }
 
     // Allow contract owner to mint to a specific address
-    function newMintToUser(address mintRecipient_) external onlyOwner {
+    function newMintToUser(address mintRecipient_, uint256 mintQTY_) external onlyOwner {
         require(mintRecipient_ != address(0), "Cannot mint to 0 address");
+        require(mintQTY_ <= 50, "Max mint batch is 50");
+        require(currentMintSupply + mintQTY_ <= maxMintSupply, "Quantity would exceed max supply");
 
-        uint256 adminMintID = doMint(mintRecipient_);
+        for (uint256 bMint; bMint < mintQTY_; bMint++) {
+            uint256 adminMintID = doMint(mintRecipient_);
 
-        emit adminAction("newMintToUser", mintRecipient_, adminMintID);
+            emit adminAction("newMintToUser", mintRecipient_, adminMintID);
+        }
     }
 
     /*
@@ -113,7 +126,9 @@ contract ERC420 is ERC1155, Ownable, ReentrancyGuard {
     
     // Mint NFT
     function newMint() external payable nonReentrant {
-        require(msg.value >= mintPrice, "Not enough ETH");
+        if (msg.sender != owner()) {
+            require(msg.value >= mintPrice, "Not enough ETH");
+        }
 
         uint256 userMintID = doMint(msg.sender);
 
@@ -183,7 +198,11 @@ contract ERC420 is ERC1155, Ownable, ReentrancyGuard {
     
     // Return URI as string
     function uri(uint256 mintID_) override public view returns (string memory) {
-        return string(abi.encodePacked(mintURI, Strings.toString(mintID_),".json"));
+        if (sharedURI) {
+            return string(abi.encodePacked(mintURI, "metadata.json"));
+        } else {
+            return string(abi.encodePacked(mintURI, Strings.toString(mintID_),".json"));
+        }
     }
 
     // List all tokens associated with a mint
