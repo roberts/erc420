@@ -6,209 +6,192 @@ import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/release-v5.2
 import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/release-v5.2/contracts/token/ERC20/utils/SafeERC20.sol";
 import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/release-v5.2/contracts/utils/ReentrancyGuard.sol";
 import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/release-v5.2/contracts/utils/Strings.sol";
+import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/release-v5.2/contracts/utils/Address.sol";
 
-contract ERC420 is ERC1155, Ownable, ReentrancyGuard {
+contract NFTCollection is ERC1155, Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using Address for address payable;
 
-    struct mintToken_data {
+    string public constant contractName = "420";
+    string public collectionName;
+    string public collectionURI;
+
+    struct MintData {
         uint256 mintID;
-        address[] tokenAddress;
+        address[] tokenAddresses;
+        mapping(address => bool) hasToken;
     }
+
+    uint256 public constant MAX_MINT_PER_WALLET = 3;
+    uint256 public constant VESTING_PERIOD = 90 days;
+    uint256 public constant VESTING_INTERVAL = 30 days;
+    uint256 public constant VESTING_PERCENTAGE = 10;
 
     bool public mintActive;
-
-    mapping(address => uint256) public allocatedContractTokens;
+    uint256 public mintPrice = 0.1 ether;
+    uint256 public maxMintSupply = 1000;
     
     uint256 public currentMintID;
-    string public mintURI = "ipfs://bafkreifpc6oda3eqfq6plborptqkn5sfewx7xky44blziiwzy4nubx7vfe/";
-
-    uint256 public mintPrice = .1 * (10 ** 18);
-    uint256 public maxMintSupply = 1000;
     uint256 public currentMintSupply;
-
-    bool public sharedURI;
-
-    mapping(uint256 => mintToken_data) public mintTokens;
-    mapping(uint256 => mapping(address => uint256)) public mintTokenBalance;
+    
+    mapping(address => uint256) public allocatedContractTokens;
+    mapping(address => uint256) public userMintedCount;
+    mapping(uint256 => MintData) public mintTokens;
+    mapping(uint256 => mapping(address => uint256)) public mintTokenInitialBalance;
+    mapping(uint256 => mapping(address => uint256)) public mintTokenWithdrawn;
     mapping(uint256 => mapping(address => uint256)) public mintTokenVestDate;
-    mapping(uint256 => mapping(address => uint256)) public mintTokenLastWithdraw;
 
-    uint256 public constant vestingPeriod = 90 days;
-    uint256 public constant vestingInterval = 30 days;
-    uint256 public constant vestingWithdrawPct = 10;
+    event TokensDeposited(uint256 indexed mintID, address indexed token, uint256 amount);
+    event MintCreated(address indexed recipient, uint256 mintID);
+    event TokensWithdrawn(address indexed user, uint256 mintID, address token, uint256 amount);
+    event CollectionURIUpdated(string newURI);
+    event MintStateChanged(bool active);
+    event ETHCleared(uint256 amount);
+    event ERC20Cleared(address token, uint256 amount);
 
-    event adminAction(string Action, address Address, uint256 Amount);
-    event userAction(string actionTaken_, address actionAddress, uint256 actionValue_, bool actionResult_);
-
-    constructor() Ownable(msg.sender) ERC1155(mintURI) {}
-
-    /*
-     * Admin functions
-     */
-
-    // Clear WETH from contract
-    function clearWETH() external onlyOwner nonReentrant {
-        uint256 fullBalance = address(this).balance;
-        (bool sendSuccess, ) = payable(owner()).call{value: fullBalance}("");
-
-        if (sendSuccess) {
-            emit adminAction("clearWETH", address(0), fullBalance);
-        } else {
-            emit adminAction("clearWETH", address(0), 0);
-        }
+    constructor(
+        string memory _collectionName,
+        string memory _collectionURI
+    ) ERC1155(_collectionURI) Ownable(msg.sender) {
+        collectionName = _collectionName;
+        collectionURI = _collectionURI;
     }
 
-    // Remove full balance of given token
-    function clearE20Token(address token_) external onlyOwner nonReentrant {
-        uint256 availableBalance = IERC20(token_).balanceOf(address(this)) - allocatedContractTokens[token_];
+    modifier validMint(uint256 mintID) {
+        require(mintID <= currentMintID && mintID > 0, "Invalid mint ID");
+        _;
+    }
+
+    function clearETH() external onlyOwner nonReentrant {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "No ETH to clear");
+        payable(owner()).sendValue(balance);
+        emit ETHCleared(balance);
+    }
+
+    function clearERC20(address token) external onlyOwner nonReentrant {
+        uint256 availableBalance = IERC20(token).balanceOf(address(this)) - allocatedContractTokens[token];
         require(availableBalance > 0, "No available tokens");
-
-        IERC20(token_).safeTransfer(owner(), availableBalance);
-
-        emit adminAction("clearE20Token", token_, availableBalance);
+        IERC20(token).safeTransfer(owner(), availableBalance);
+        emit ERC20Cleared(token, availableBalance);
     }
 
-    // Enable or disable new minting
-    function setMintActive(bool mintActive_) external onlyOwner {
-        mintActive = mintActive_;
-
-        emit adminAction("setMintActive", msg.sender, mintActive_ ? 0 : 1 );
+    function setMintActive(bool active) external onlyOwner {
+        mintActive = active;
+        emit MintStateChanged(active);
     }
 
-    // Enable or disable unique URI JSON
-    function setSharedURI(bool sharedURI_) external onlyOwner {
-        sharedURI = sharedURI_;
-
-        emit adminAction("setSharedURI", msg.sender, sharedURI_ ? 0 : 1 );
+    function setCollectionURI(string memory newURI) external onlyOwner {
+        collectionURI = newURI;
+        emit CollectionURIUpdated(newURI);
     }
 
-    // Deposit tokens to a specific mint
-    // TOKEN APPROVAL MUST HAPPEN EXTERNALLY FIRST
-    function depositTokens(uint256 mintID_, address tokenAddress_, uint256 tokenAmount_) external onlyOwner {
-        mintTokens[mintID_].mintID = mintID_;
-
-        bool newToken = true;
-        for (uint256 ct; ct < mintTokens[mintID_].tokenAddress.length; ct++) {
-            if (mintTokens[mintID_].tokenAddress[ct] == tokenAddress_) {
-                newToken = false;
-                break;
-            }
-        }
-
-        if (newToken) {
-            mintTokens[mintID_].tokenAddress.push(tokenAddress_);
-            mintTokenVestDate[mintID_][tokenAddress_] = block.timestamp + vestingPeriod;
-        }
-
-        IERC20(tokenAddress_).safeTransferFrom(msg.sender, address(this), tokenAmount_);
-        mintTokenBalance[mintID_][tokenAddress_] += tokenAmount_;
-        allocatedContractTokens[tokenAddress_] += tokenAmount_;
-
-        emit adminAction("depositTokens", tokenAddress_, tokenAmount_);
+    function setCollectionName(string memory newName) external onlyOwner {
+        collectionName = newName;
     }
 
-    // Allow contract owner to mint to a specific address
-    function newMintToUser(address mintRecipient_, uint256 mintQTY_) external onlyOwner {
-        require(mintRecipient_ != address(0), "Cannot mint to 0 address");
-        require(mintQTY_ <= 50, "Max mint batch is 50");
-        require(currentMintSupply + mintQTY_ <= maxMintSupply, "Quantity would exceed max supply");
-
-        for (uint256 bMint; bMint < mintQTY_; bMint++) {
-            uint256 adminMintID = doMint(mintRecipient_);
-
-            emit adminAction("newMintToUser", mintRecipient_, adminMintID);
-        }
-    }
-
-    /*
-     * User Functions
-     */
-    
-    // Mint NFT
-    function newMint() external payable nonReentrant {
-        if (msg.sender != owner()) {
-            require(msg.value >= mintPrice, "Not enough ETH");
-        }
-
-        uint256 userMintID = doMint(msg.sender);
-
-        emit userAction("newMint", msg.sender, userMintID, true);
-    }
-
-    // Burn NFT
-    function burnMint(uint256 mintID_) external {
-        require(balanceOf(msg.sender, mintID_) > 0, "Nothing to burn");
-
-        for (uint256 ct; ct < mintTokens[mintID_].tokenAddress.length; ct++) {
-            address curToken = mintTokens[mintID_].tokenAddress[ct];
-            allocatedContractTokens[curToken] -= mintTokenBalance[mintID_][curToken];
-            mintTokenBalance[mintID_][curToken] = 0;
-        }
-
-        delete mintTokens[mintID_];
-
-        _burn(msg.sender, mintID_, 1);
-
-        currentMintSupply--;
-
-        emit userAction("burnMint", msg.sender, mintID_, true);
-    }
-
-    // Withdraw tokens from a mint
-    function withdrawTokensFromMint(uint256 mintID_) external {
-        require(balanceOf(msg.sender, mintID_) > 0, "Sender does not own this mint");
-
-        for (uint256 ct; ct < mintTokens[mintID_].tokenAddress.length; ct++) {
-            address curToken = mintTokens[mintID_].tokenAddress[ct];
-            if (
-                block.timestamp >= mintTokenVestDate[mintID_][curToken] &&
-                block.timestamp >= mintTokenLastWithdraw[mintID_][curToken] + vestingInterval
-            ) {
-                uint256 withdrawAmount = (mintTokenBalance[mintID_][curToken] * vestingWithdrawPct) / 100;
-                IERC20(curToken).safeTransfer(msg.sender, withdrawAmount);
-                mintTokenBalance[mintID_][curToken] -= withdrawAmount;
-                allocatedContractTokens[curToken] -= withdrawAmount;
-                mintTokenLastWithdraw[mintID_][curToken] = block.timestamp;
-
-                emit userAction("withdrawTokensFromMint1", msg.sender, mintID_, true);
-                emit userAction("withdrawTokensFromMint2", curToken, withdrawAmount, true);
-            } else {
-                emit userAction("withdrawTokensFromMint1", msg.sender, mintID_, false);
-                emit userAction("withdrawTokensFromMint2", curToken, 0, false);
-            }
-        }
-    }
-
-    /*
-     * Support Functions
-     */
-    
-    // Perform mint actions
-    function doMint(address mintRecipient_) internal returns (uint256) {
-        require(currentMintSupply < maxMintSupply, "Cannot mint any more NFTs");
-        require(mintActive || msg.sender == owner(), "Minting is currently unavailable");
-
-        uint256 newMintID = ++currentMintID;
-        _mint(mintRecipient_, newMintID, 1, "");
+    function depositTokens(uint256 mintID, address token, uint256 amount) external onlyOwner {
+        require(token != address(0), "Invalid token address");
+        require(amount > 0, "Invalid amount");
         
-        currentMintSupply++;
+        MintData storage data = mintTokens[mintID];
+        if (!data.hasToken[token]) {
+            data.tokenAddresses.push(token);
+            data.hasToken[token] = true;
+            mintTokenVestDate[mintID][token] = block.timestamp + VESTING_PERIOD;
+        }
 
-        return newMintID;
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        mintTokenInitialBalance[mintID][token] += amount;
+        allocatedContractTokens[token] += amount;
+
+        emit TokensDeposited(mintID, token, amount);
     }
-    
-    // Return URI as string
-    function uri(uint256 mintID_) override public view returns (string memory) {
-        if (sharedURI) {
-            return string(abi.encodePacked(mintURI, "metadata.json"));
-        } else {
-            return string(abi.encodePacked(mintURI, Strings.toString(mintID_),".json"));
+
+    function adminMint(address recipient, uint256 quantity) external onlyOwner {
+        require(recipient != address(0), "Invalid recipient");
+        require(quantity <= 50 && quantity > 0, "Invalid quantity");
+        require(currentMintSupply + quantity <= maxMintSupply, "Exceeds max supply");
+
+        for (uint256 i = 0; i < quantity; i++) {
+            _mint(recipient, ++currentMintID, 1, "");
+            currentMintSupply++;
+            emit MintCreated(recipient, currentMintID);
         }
     }
 
-    // List all tokens associated with a mint
-    function showMintTokens(uint256 mintID_) external view returns (address[] memory) {
-        return mintTokens[mintID_].tokenAddress;
+    function mint() external payable nonReentrant {
+        require(mintActive, "Minting inactive");
+        require(msg.value >= mintPrice, "Insufficient ETH");
+        require(currentMintSupply < maxMintSupply, "Max supply reached");
+        require(userMintedCount[msg.sender] < MAX_MINT_PER_WALLET, "Max 3 mints per wallet");
+
+        _mint(msg.sender, ++currentMintID, 1, "");
+        currentMintSupply++;
+        userMintedCount[msg.sender]++;
+
+        emit MintCreated(msg.sender, currentMintID);
+
+        if (msg.value > mintPrice) {
+            payable(msg.sender).sendValue(msg.value - mintPrice);
+        }
     }
 
-    // KDR-20250115
+    function burn(uint256 mintID) external validMint(mintID) {
+        require(balanceOf(msg.sender, mintID) == 1, "Not owner");
+
+        MintData storage data = mintTokens[mintID];
+        for (uint256 i = 0; i < data.tokenAddresses.length; i++) {
+            address token = data.tokenAddresses[i];
+            uint256 remaining = mintTokenInitialBalance[mintID][token] - mintTokenWithdrawn[mintID][token];
+            allocatedContractTokens[token] -= remaining;
+            delete mintTokenInitialBalance[mintID][token];
+            delete mintTokenWithdrawn[mintID][token];
+            delete mintTokenVestDate[mintID][token];
+        }
+        
+        delete mintTokens[mintID];
+        _burn(msg.sender, mintID, 1);
+        currentMintSupply--;
+    }
+
+    function withdraw(uint256 mintID) external validMint(mintID) nonReentrant {
+        require(balanceOf(msg.sender, mintID) == 1, "Not owner");
+
+        MintData storage data = mintTokens[mintID];
+        for (uint256 i = 0; i < data.tokenAddresses.length; i++) {
+            address token = data.tokenAddresses[i];
+            _processWithdrawal(mintID, token);
+        }
+    }
+
+    function uri(uint256) public view override returns (string memory) {
+        return collectionURI;
+    }
+
+    function getMintTokens(uint256 mintID) external view returns (address[] memory) {
+        return mintTokens[mintID].tokenAddresses;
+    }
+
+    function _processWithdrawal(uint256 mintID, address token) private {
+        require(block.timestamp >= mintTokenVestDate[mintID][token], "Vesting not started");
+        
+        uint256 timePassed = block.timestamp - mintTokenVestDate[mintID][token];
+        uint256 intervals = timePassed / VESTING_INTERVAL;
+        intervals = intervals > 10 ? 10 : intervals;
+
+        uint256 totalWithdrawable = (mintTokenInitialBalance[mintID][token] * VESTING_PERCENTAGE * intervals) / 100;
+        uint256 available = totalWithdrawable - mintTokenWithdrawn[mintID][token];
+
+        if (available > 0) {
+            mintTokenWithdrawn[mintID][token] += available;
+            allocatedContractTokens[token] -= available;
+            IERC20(token).safeTransfer(msg.sender, available);
+            emit TokensWithdrawn(msg.sender, mintID, token, available);
+        }
+    }
+
+    function supportsInterface(bytes4 interfaceId) public view override(ERC1155) returns (bool) {
+    return super.supportsInterface(interfaceId);
+    }
 }
