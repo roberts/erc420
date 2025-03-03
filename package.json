@@ -1,0 +1,27 @@
+{
+  "name": "robert-erc420",
+  "version": "1.0.0",
+  "description": "This is the official repository for the Drew Roberts Digital Standard of the ERC-420. Much like the ERC-404, this is neither an ERC nor would it be number 420 if it was. It's not intended to be a standard by the Ethereum Foundadion to Reqest Comments.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/blueogin/robert-erc420.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/blueogin/robert-erc420/issues"
+  },
+  "homepage": "https://github.com/blueogin/robert-erc420#readme",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.19"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.2.0"
+  }
+}
