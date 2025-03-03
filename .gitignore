@@ -32,3 +32,6 @@ auth.json
 #hardhat
 artifacts/
 typechain-types/
+
+#node
+package-lock.json
